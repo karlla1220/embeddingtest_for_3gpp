@@ -135,7 +135,7 @@ def build_model_catalog() -> list[ModelSpec]:
     ]
 
 
-def _normalise_blocks(markdown_text: str) -> list[str]:
+def _normalize_blocks(markdown_text: str) -> list[str]:
     lines = [line.rstrip() for line in markdown_text.splitlines()]
     blocks: list[str] = []
     current: list[str] = []
@@ -221,7 +221,7 @@ def _split_oversized_text(text: str, max_chars: int) -> list[str]:
 
 def chunk_markdown_text(markdown_text: str, source: str, max_chars: int = 400) -> list[Chunk]:
     chunk_texts: list[str] = []
-    for block in _normalise_blocks(markdown_text):
+    for block in _normalize_blocks(markdown_text):
         chunk_texts.extend(_split_oversized_text(block, max_chars=max_chars))
 
     return [
@@ -331,6 +331,14 @@ def _phrase_bonus(query: str, chunk_text: str) -> float:
 
 
 def score_chunk(query: str, chunk: Chunk, model: ModelSpec) -> tuple[float, list[str]]:
+    """Return a deterministic demo score and matched query terms for one chunk/model pair.
+
+    The score is a lightweight lexical surrogate so this repository stays dependency-free:
+    query-term coverage, chunk density, ordered bigram overlap, phrase containment, and a
+    small heading bonus are combined with model-specific weights. The return value is a
+    tuple of `(score, matched_terms)` so the caller can both rank results and explain why
+    a chunk was surfaced in the Top K output.
+    """
     query_tokens = _tokenize(query)
     chunk_tokens = _tokenize(chunk.text)
     query_terms = set(query_tokens)
@@ -346,6 +354,9 @@ def score_chunk(query: str, chunk: Chunk, model: ModelSpec) -> tuple[float, list
     phrase = _phrase_bonus(query, chunk.text)
     heading_bonus = 0.35 if chunk.text.lstrip().startswith("#") else 0.0
 
+    # Tuple order: coverage_weight, ordered_weight, phrase_weight, density_weight, heading_weight.
+    # The values intentionally emphasize exact or near-exact matches more strongly for rerankers
+    # and late-interaction models so reviewers can inspect different Top K orderings per method.
     score_profiles = {
         "openai_text_small": (3.0, 1.2, 1.5, 0.4, 0.0),
         "qwen3_embedding_8b": (3.2, 1.0, 1.8, 0.3, 0.1),
@@ -364,6 +375,8 @@ def score_chunk(query: str, chunk: Chunk, model: ModelSpec) -> tuple[float, list
         + (heading_bonus * heading_weight)
     )
 
+    # Non-dense-only models receive a small extra boost for multiple matched terms because the
+    # demo is trying to approximate rerank behavior on the same review corpus without real inference.
     if model.family != "single_embedding":
         score += min(len(common_terms), 4) * 0.08
 
@@ -420,6 +433,12 @@ def rank_chunks_for_model(query: str, chunks: Sequence[Chunk], model: ModelSpec,
 
 
 def build_query_demo(query: str, chunks: Sequence[Chunk], top_k: int) -> dict[str, object]:
+    """Build the query-review payload used by both JSON output and markdown rendering.
+
+    The returned mapping contains top-level query/setup metadata, the serialized model
+    catalog with runtime preparation details, the per-model `retrieval_results` Top K list,
+    and the raw chunk corpus so a caller can inspect or post-process the same ranking input.
+    """
     catalog = build_model_catalog()
     return {
         "query": query,

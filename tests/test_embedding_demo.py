@@ -20,6 +20,7 @@ SAMPLE_MARKDOWN = "# 제목\n\n3GPP 임베딩 비교 데모 문서입니다. Qwe
 
 class EmbeddingDemoTests(unittest.TestCase):
     def test_model_catalog_contains_requested_targets(self) -> None:
+        """Verify the demo exposes all requested models and both runtime preparation modes."""
         models = build_model_catalog()
         model_names = {model.display_name for model in models}
         self.assertEqual(
@@ -48,6 +49,7 @@ class EmbeddingDemoTests(unittest.TestCase):
         self.assertEqual([chunk.text for chunk in extracted_chunks], ["중요 문장 1", "중요 문장 2"])
 
     def test_query_demo_returns_top_k_per_model(self) -> None:
+        """Verify query-driven output returns the requested Top K across every model."""
         chunks = load_extracted_chunks(
             inline_items=[
                 "3GPP 임베딩 비교를 위한 OpenAI text-small 기준 문장",
