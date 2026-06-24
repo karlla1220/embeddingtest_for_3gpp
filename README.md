@@ -1,6 +1,6 @@
 # embeddingtest_for_3gpp
 
-간단한 임베딩 비교 데모를 위해 `/home/runner/work/embeddingtest_for_3gpp/embeddingtest_for_3gpp/embedding_demo.py`를 추가했습니다.
+간단한 임베딩 비교 데모를 위해 `embedding_demo.py`를 추가했습니다.
 
 이 데모는 다음을 바로 준비합니다.
 
@@ -18,13 +18,13 @@
 ## 사용 예시
 
 ```bash
-python /home/runner/work/embeddingtest_for_3gpp/embeddingtest_for_3gpp/embedding_demo.py \
+python embedding_demo.py \
   --docs /absolute/path/to/docs \
   --json-input /absolute/path/to/extracted_sentences.json
 ```
 
 ```bash
-python /home/runner/work/embeddingtest_for_3gpp/embeddingtest_for_3gpp/embedding_demo.py \
+python embedding_demo.py \
   --docs /absolute/path/to/file.md \
   --inline-item "핵심 문장 1" \
   --inline-item "핵심 문장 2" \
@@ -55,5 +55,5 @@ python /home/runner/work/embeddingtest_for_3gpp/embeddingtest_for_3gpp/embedding
 ## 테스트
 
 ```bash
-python -m unittest discover -s /home/runner/work/embeddingtest_for_3gpp/embeddingtest_for_3gpp/tests
+python -m unittest discover -s tests
 ```

@@ -14,7 +14,8 @@ from embedding_demo import (
 )
 
 
-REPO_ROOT = Path("/home/runner/work/embeddingtest_for_3gpp/embeddingtest_for_3gpp")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SAMPLE_MARKDOWN = "# 제목\n\n첫 문단입니다. 두 번째 문장도 있습니다.\n\n둘째 문단입니다."
 
 
 class EmbeddingDemoTests(unittest.TestCase):
@@ -33,8 +34,12 @@ class EmbeddingDemoTests(unittest.TestCase):
         )
 
     def test_markdown_and_extracted_inputs_are_chunked(self) -> None:
-        markdown = "# 제목\n\n첫 문단입니다. 두 번째 문장도 있습니다.\n\n둘째 문단입니다."
-        markdown_chunks = chunk_markdown_text(markdown, "/tmp/demo.md", max_chars=30)
+        markdown_chunks = chunk_markdown_text(
+            SAMPLE_MARKDOWN,
+            str(Path(tempfile.gettempdir()) / "demo.md"),
+            max_chars=30,
+        )
+        # Heading, the split first paragraph, and the final paragraph should produce at least 3 chunks.
         self.assertGreaterEqual(len(markdown_chunks), 3)
 
         extracted_chunks = load_extracted_chunks(inline_items=["중요 문장 1", "중요 문장 2"])
@@ -68,6 +73,7 @@ class EmbeddingDemoTests(unittest.TestCase):
             )
 
             chunks = load_markdown_chunks([str(markdown_path)])
+            # The sample markdown contains one heading block and two paragraph blocks.
             self.assertEqual(len(chunks), 3)
 
             extracted_chunks = load_extracted_chunks(json_path=str(json_path))
@@ -87,9 +93,11 @@ class EmbeddingDemoTests(unittest.TestCase):
                 check=True,
                 capture_output=True,
                 text=True,
+                cwd=REPO_ROOT,
             )
 
             payload = json.loads(result.stdout)
+            # The CLI output includes three markdown chunks from the file plus one extracted sentence.
             self.assertEqual(payload["input_summary"]["total_chunks"], 4)
             self.assertEqual(len(payload["models"]), 6)
 

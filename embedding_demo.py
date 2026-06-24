@@ -17,7 +17,7 @@ class ModelSpec:
     display_name: str
     family: str
     provider: str
-    dimension_hint: str
+    dimension_notes: str
     purpose: str
 
 
@@ -36,7 +36,7 @@ def build_model_catalog() -> list[ModelSpec]:
             display_name="text-small (OpenAI)",
             family="single_embedding",
             provider="OpenAI",
-            dimension_hint="mid/low (~1,500)",
+            dimension_notes="dimension: medium-low (~1,500)",
             purpose="single-vector baseline and first-stage retrieval",
         ),
         ModelSpec(
@@ -44,7 +44,7 @@ def build_model_catalog() -> list[ModelSpec]:
             display_name="Qwen/Qwen3-Embedding-8B",
             family="single_embedding",
             provider="Qwen",
-            dimension_hint="high (8,000+)",
+            dimension_notes="dimension: high (8,000+)",
             purpose="high-dimensional single-vector baseline",
         ),
         ModelSpec(
@@ -52,7 +52,7 @@ def build_model_catalog() -> list[ModelSpec]:
             display_name="bge-m3",
             family="single_embedding",
             provider="BAAI",
-            dimension_hint="general-purpose dense embedding",
+            dimension_notes="dimension: standard dense (1,024)",
             purpose="general single-vector baseline and candidate generation",
         ),
         ModelSpec(
@@ -60,23 +60,23 @@ def build_model_catalog() -> list[ModelSpec]:
             display_name="bge-reranker-v2-m3",
             family="cross_encoder_reranker",
             provider="BAAI",
-            dimension_hint="not applicable",
+            dimension_notes="dimension: not applicable",
             purpose="cross-encoder reranking of retrieved candidates",
         ),
         ModelSpec(
             key="colbert",
             display_name="ColBERT",
             family="late_interaction",
-            provider="Qdrant-compatible",
-            dimension_hint="multi-vector late interaction",
-            purpose="late-interaction reranking baseline",
+            provider="Stanford",
+            dimension_notes="dimension: multi-vector token embeddings",
+            purpose="late-interaction reranking baseline compatible with Qdrant flows",
         ),
         ModelSpec(
             key="nemotron",
             display_name="Nemotron",
             family="late_interaction",
             provider="NVIDIA",
-            dimension_hint="multi-vector late interaction",
+            dimension_notes="dimension: multi-vector token embeddings",
             purpose="late-interaction comparison target",
         ),
     ]
@@ -112,6 +112,31 @@ def _split_oversized_text(text: str, max_chars: int) -> list[str]:
 
     sentences = [sentence.strip() for sentence in SENTENCE_SPLIT_RE.split(text) if sentence.strip()]
     if not sentences:
+        words = text.split()
+        if words:
+            word_chunks: list[str] = []
+            current = ""
+            for word in words:
+                candidate = f"{current} {word}".strip() if current else word
+                if current and len(candidate) > max_chars:
+                    word_chunks.append(current)
+                    current = word
+                    continue
+                if len(word) > max_chars:
+                    if current:
+                        word_chunks.append(current)
+                        current = ""
+                    word_chunks.extend(
+                        piece.strip()
+                        for piece in (word[i : i + max_chars] for i in range(0, len(word), max_chars))
+                        if piece.strip()
+                    )
+                    continue
+                current = candidate
+            if current:
+                word_chunks.append(current)
+            return word_chunks
+
         return [text[i : i + max_chars].strip() for i in range(0, len(text), max_chars)]
 
     chunks: list[str] = []
@@ -181,7 +206,10 @@ def _coerce_extracted_items(payload: object) -> list[dict[str, str]]:
         payload = payload.get("items", [])
 
     if not isinstance(payload, list):
-        raise ValueError("Extracted sentence input must be a list or an object with an 'items' list.")
+        raise ValueError(
+            "Extracted sentence input must be a list or an object with an 'items' list; "
+            f"received {type(payload).__name__}."
+        )
 
     items: list[dict[str, str]] = []
     for index, entry in enumerate(payload, start=1):
@@ -235,7 +263,7 @@ def build_demo_plan(chunks: Sequence[Chunk]) -> dict[str, object]:
             "goal": "단일 임베딩만으로 검색 품질이 충분한지 확인",
             "models": single_models,
             "metrics": ["Recall@5", "Recall@10", "MRR", "nDCG@10"],
-            "success_signal": "best single model이 정답 문단을 안정적으로 상위권에 배치",
+            "success_criteria": "가장 성능이 좋은 단일 임베딩 모델이 정답 문단을 안정적으로 상위권에 배치",
         },
         {
             "name": "candidate_generation_for_reranking",
@@ -244,7 +272,7 @@ def build_demo_plan(chunks: Sequence[Chunk]) -> dict[str, object]:
             "rerankers": rerankers,
             "candidate_cutoffs": [10, 20, 50],
             "metrics": ["Candidate Recall@10", "Candidate Recall@20", "MRR after rerank"],
-            "success_signal": "single-vector 후보군 안에 정답이 충분히 포함되어 reranker 성능이 회복 또는 향상",
+            "success_criteria": "단일 임베딩 후보군 안에 정답이 충분히 포함되어 리랭커 성능이 회복 또는 향상",
         },
         {
             "name": "multi_embedding_comparison",
@@ -256,7 +284,7 @@ def build_demo_plan(chunks: Sequence[Chunk]) -> dict[str, object]:
                 "union of multiple dense candidate sets",
             ],
             "metrics": ["Recall@10", "MRR", "nDCG@10", "delta vs best single"],
-            "success_signal": "다단계 또는 멀티 임베딩 조합이 best single baseline보다 일관된 향상",
+            "success_criteria": "다단계 또는 멀티 임베딩 조합이 가장 성능이 좋은 단일 임베딩 기준선보다 일관되게 향상",
         },
     ]
 
@@ -278,25 +306,32 @@ def build_demo_plan(chunks: Sequence[Chunk]) -> dict[str, object]:
 
 
 def render_markdown_report(plan: dict[str, object]) -> str:
-    input_summary = plan["input_summary"]
-    models = plan["models"]
-    experiments = plan["experiments"]
-    questions = plan["validation_questions"]
+    input_summary = plan.get("input_summary") or {}
+    models: list[dict[str, object]] = plan.get("models") or []
+    experiments: list[dict[str, object]] = plan.get("experiments") or []
+    questions = plan.get("validation_questions") or []
+    sources = input_summary.get("sources") if isinstance(input_summary, dict) else []
+    chunk_kinds = input_summary.get("chunk_kinds") if isinstance(input_summary, dict) else []
+    total_chunks = input_summary.get("total_chunks") if isinstance(input_summary, dict) else 0
 
     lines = [
         "# Embedding Comparison Demo",
         "",
         "## Input Summary",
-        f"- Total chunks: {input_summary['total_chunks']}",
-        f"- Sources: {', '.join(input_summary['sources']) if input_summary['sources'] else 'none'}",
-        f"- Chunk kinds: {', '.join(input_summary['chunk_kinds']) if input_summary['chunk_kinds'] else 'none'}",
+        f"- Total chunks: {total_chunks}",
+        f"- Sources: {', '.join(sources) if sources else 'none'}",
+        f"- Chunk kinds: {', '.join(chunk_kinds) if chunk_kinds else 'none'}",
         "",
         "## Model Catalog",
     ]
 
     for model in models:
         lines.append(
-            f"- **{model['display_name']}** · {model['family']} · {model['dimension_hint']} · {model['purpose']}"
+            "- "
+            f"**{model.get('display_name', 'unknown')}** · "
+            f"{model.get('family', 'unknown')} · "
+            f"{model.get('dimension_notes', 'unknown')} · "
+            f"{model.get('purpose', 'unknown')}"
         )
 
     lines.extend(["", "## Validation Questions"])
@@ -304,15 +339,15 @@ def render_markdown_report(plan: dict[str, object]) -> str:
     lines.extend(["", "## Experiment Plan"])
 
     for experiment in experiments:
-        lines.append(f"### {experiment['name']}")
-        lines.append(f"- Goal: {experiment['goal']}")
+        lines.append(f"### {experiment.get('name', 'unnamed_experiment')}")
+        lines.append(f"- Goal: {experiment.get('goal', 'not provided')}")
         for key in ("models", "candidate_models", "rerankers", "candidate_cutoffs", "strategies", "metrics"):
             if key in experiment:
                 value = experiment[key]
                 if isinstance(value, list):
                     value = ", ".join(str(item) for item in value)
                 lines.append(f"- {key}: {value}")
-        lines.append(f"- success_signal: {experiment['success_signal']}")
+        lines.append(f"- success_criteria: {experiment.get('success_criteria', 'not provided')}")
         lines.append("")
 
     return "\n".join(lines).strip() + "\n"
