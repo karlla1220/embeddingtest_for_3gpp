@@ -5,10 +5,11 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Sequence
 
 
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]+")
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,10 @@ class ModelSpec:
     provider: str
     dimension_notes: str
     purpose: str
+    runtime_mode: str
+    runtime_summary: str
+    prep_steps: tuple[str, ...]
+    review_note: str
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,14 @@ def build_model_catalog() -> list[ModelSpec]:
             provider="OpenAI",
             dimension_notes="dimension: medium-low (~1,500)",
             purpose="single-vector baseline and first-stage retrieval",
+            runtime_mode="openai_compatible_api",
+            runtime_summary="OpenAI-compatible embedding endpoint",
+            prep_steps=(
+                "Set OPENAI_BASE_URL to the embedding API endpoint.",
+                "Set OPENAI_API_KEY for the endpoint.",
+                "Set OPENAI_TEXT_SMALL_MODEL to the deployed model name.",
+            ),
+            review_note="사람이 쿼리 기준으로 상위 K개 문서가 적절히 모이는지 가장 먼저 확인할 기본 dense baseline",
         ),
         ModelSpec(
             key="qwen3_embedding_8b",
@@ -46,6 +59,14 @@ def build_model_catalog() -> list[ModelSpec]:
             provider="Qwen",
             dimension_notes="dimension: high (8,000+)",
             purpose="high-dimensional single-vector baseline",
+            runtime_mode="openai_compatible_api",
+            runtime_summary="OpenAI-compatible embedding endpoint, typically served through a gateway such as vLLM",
+            prep_steps=(
+                "Serve the model behind an OpenAI-compatible /embeddings API.",
+                "Set QWEN3_EMBEDDING_BASE_URL to that endpoint.",
+                "Set QWEN3_EMBEDDING_MODEL to the served model name.",
+            ),
+            review_note="고차원 dense 임베딩이 같은 쿼리에서 더 관련도 높은 문단을 상단에 배치하는지 비교",
         ),
         ModelSpec(
             key="bge_m3",
@@ -54,6 +75,14 @@ def build_model_catalog() -> list[ModelSpec]:
             provider="BAAI",
             dimension_notes="dimension: standard dense (1,024)",
             purpose="general single-vector baseline and candidate generation",
+            runtime_mode="local_cpu",
+            runtime_summary="Local CPU execution for offline dense retrieval checks",
+            prep_steps=(
+                "Install a local sentence-transformers style runtime on CPU.",
+                "Set BGE_M3_MODEL_PATH to the local model directory or cache key.",
+                "Run with CPU-only settings for reproducible offline checks.",
+            ),
+            review_note="로컬 CPU로 쉽게 반복 확인할 dense 기준선이며 멀티벡터 리랭킹 전 후보 생성 기준으로도 확인",
         ),
         ModelSpec(
             key="bge_reranker_v2_m3",
@@ -62,6 +91,14 @@ def build_model_catalog() -> list[ModelSpec]:
             provider="BAAI",
             dimension_notes="dimension: not applicable",
             purpose="cross-encoder reranking of retrieved candidates",
+            runtime_mode="local_cpu",
+            runtime_summary="Local CPU reranker for manual Top K inspection after candidate generation",
+            prep_steps=(
+                "Install a local cross-encoder runtime on CPU.",
+                "Set BGE_RERANKER_MODEL_PATH to the reranker directory or cache key.",
+                "Feed it the first-stage Top K candidates for final inspection.",
+            ),
+            review_note="실서비스에서는 dense 후보군 재정렬용이지만 데모에서는 전 문서 기준 점수도 바로 확인 가능",
         ),
         ModelSpec(
             key="colbert",
@@ -70,6 +107,14 @@ def build_model_catalog() -> list[ModelSpec]:
             provider="Stanford",
             dimension_notes="dimension: multi-vector token embeddings",
             purpose="late-interaction reranking baseline compatible with Qdrant flows",
+            runtime_mode="local_cpu",
+            runtime_summary="Local CPU late-interaction preparation for manual reranking review",
+            prep_steps=(
+                "Prepare a local ColBERT-style index or token embedding cache.",
+                "Set COLBERT_INDEX_PATH to the local index location.",
+                "Use CPU-only search for deterministic reviewer checks on a small corpus.",
+            ),
+            review_note="멀티벡터 late interaction이 정답 문서를 더 위로 끌어올리는지 사람이 직접 보기 좋음",
         ),
         ModelSpec(
             key="nemotron",
@@ -78,6 +123,14 @@ def build_model_catalog() -> list[ModelSpec]:
             provider="NVIDIA",
             dimension_notes="dimension: multi-vector token embeddings",
             purpose="late-interaction comparison target",
+            runtime_mode="local_cpu",
+            runtime_summary="Local CPU late-interaction comparison path for small manual review sets",
+            prep_steps=(
+                "Prepare a local Nemotron embedding or rerank artifact on CPU.",
+                "Set NEMOTRON_MODEL_PATH to the local artifact directory.",
+                "Use it on small reviewer-selected candidate sets for qualitative comparison.",
+            ),
+            review_note="ColBERT와 함께 멀티벡터 계열이 dense baseline보다 상위 K 품질을 얼마나 끌어올리는지 비교",
         ),
     ]
 
@@ -139,20 +192,20 @@ def _split_oversized_text(text: str, max_chars: int) -> list[str]:
 
         return [text[i : i + max_chars].strip() for i in range(0, len(text), max_chars)]
 
-    chunks: list[str] = []
+    sentence_chunks: list[str] = []
     current = ""
 
     for sentence in sentences:
         candidate = f"{current} {sentence}".strip() if current else sentence
         if current and len(candidate) > max_chars:
-            chunks.append(current)
+            sentence_chunks.append(current)
             current = sentence
             continue
         if len(sentence) > max_chars:
             if current:
-                chunks.append(current)
+                sentence_chunks.append(current)
                 current = ""
-            chunks.extend(
+            sentence_chunks.extend(
                 piece.strip()
                 for piece in (sentence[i : i + max_chars] for i in range(0, len(sentence), max_chars))
                 if piece.strip()
@@ -161,9 +214,9 @@ def _split_oversized_text(text: str, max_chars: int) -> list[str]:
         current = candidate
 
     if current:
-        chunks.append(current)
+        sentence_chunks.append(current)
 
-    return chunks
+    return sentence_chunks
 
 
 def chunk_markdown_text(markdown_text: str, source: str, max_chars: int = 400) -> list[Chunk]:
@@ -252,64 +305,141 @@ def load_extracted_chunks(*, json_path: str | None = None, inline_items: Sequenc
     ]
 
 
-def build_demo_plan(chunks: Sequence[Chunk]) -> dict[str, object]:
-    catalog = build_model_catalog()
-    single_models = [model.display_name for model in catalog if model.family == "single_embedding"]
-    rerankers = [model.display_name for model in catalog if model.family != "single_embedding"]
+def _tokenize(text: str) -> list[str]:
+    return [token.lower() for token in TOKEN_RE.findall(text)]
 
-    experiments = [
-        {
-            "name": "single_embedding_baseline",
-            "goal": "단일 임베딩만으로 검색 품질이 충분한지 확인",
-            "models": single_models,
-            "metrics": ["Recall@5", "Recall@10", "MRR", "nDCG@10"],
-            "success_criteria": "가장 성능이 좋은 단일 임베딩 모델이 정답 문단을 안정적으로 상위권에 배치",
-        },
-        {
-            "name": "candidate_generation_for_reranking",
-            "goal": "단일 임베딩으로 멀티벡터/리랭커용 후보군을 안정적으로 만들 수 있는지 확인",
-            "candidate_models": single_models,
-            "rerankers": rerankers,
-            "candidate_cutoffs": [10, 20, 50],
-            "metrics": ["Candidate Recall@10", "Candidate Recall@20", "MRR after rerank"],
-            "success_criteria": "단일 임베딩 후보군 안에 정답이 충분히 포함되어 리랭커 성능이 회복 또는 향상",
-        },
-        {
-            "name": "multi_embedding_comparison",
-            "goal": "멀티 임베딩 또는 멀티 스테이지 구성이 단일 임베딩 대비 얼마나 개선되는지 확인",
-            "strategies": [
-                "single best dense model",
-                "dense + cross-encoder rerank",
-                "dense + late-interaction rerank",
-                "union of multiple dense candidate sets",
-            ],
-            "metrics": ["Recall@10", "MRR", "nDCG@10", "delta vs best single"],
-            "success_criteria": "다단계 또는 멀티 임베딩 조합이 가장 성능이 좋은 단일 임베딩 기준선보다 일관되게 향상",
-        },
-    ]
+
+def _ordered_bigram_overlap(query_tokens: Sequence[str], chunk_tokens: Sequence[str]) -> float:
+    query_bigrams = list(zip(query_tokens, query_tokens[1:]))
+    if not query_bigrams:
+        return 0.0
+    chunk_bigram_set = set(zip(chunk_tokens, chunk_tokens[1:]))
+    matches = sum(1 for bigram in query_bigrams if bigram in chunk_bigram_set)
+    return matches / len(query_bigrams)
+
+
+def _phrase_bonus(query: str, chunk_text: str) -> float:
+    normalized_query = " ".join(query.lower().split())
+    normalized_chunk = " ".join(chunk_text.lower().split())
+    if not normalized_query or not normalized_chunk:
+        return 0.0
+    if normalized_query in normalized_chunk:
+        return 1.0
+    compact_query = normalized_query.replace(" ", "")
+    compact_chunk = normalized_chunk.replace(" ", "")
+    return 0.5 if compact_query and compact_query in compact_chunk else 0.0
+
+
+def score_chunk(query: str, chunk: Chunk, model: ModelSpec) -> tuple[float, list[str]]:
+    query_tokens = _tokenize(query)
+    chunk_tokens = _tokenize(chunk.text)
+    query_terms = set(query_tokens)
+    chunk_terms = set(chunk_tokens)
+    common_terms = sorted(query_terms & chunk_terms)
+
+    if not query_terms or not chunk_terms:
+        return 0.0, common_terms
+
+    coverage = len(common_terms) / len(query_terms)
+    density = len(common_terms) / len(chunk_terms)
+    ordered_overlap = _ordered_bigram_overlap(query_tokens, chunk_tokens)
+    phrase = _phrase_bonus(query, chunk.text)
+    heading_bonus = 0.35 if chunk.text.lstrip().startswith("#") else 0.0
+
+    score_profiles = {
+        "openai_text_small": (3.0, 1.2, 1.5, 0.4, 0.0),
+        "qwen3_embedding_8b": (3.2, 1.0, 1.8, 0.3, 0.1),
+        "bge_m3": (3.1, 1.3, 1.4, 0.2, 0.0),
+        "bge_reranker_v2_m3": (3.5, 2.4, 2.2, 0.4, 0.0),
+        "colbert": (3.4, 1.9, 1.8, 0.2, 0.2),
+        "nemotron": (3.3, 2.0, 1.9, 0.2, 0.15),
+    }
+    coverage_weight, ordered_weight, phrase_weight, density_weight, heading_weight = score_profiles[model.key]
+
+    score = (
+        (coverage * coverage_weight)
+        + (ordered_overlap * ordered_weight)
+        + (phrase * phrase_weight)
+        + (density * density_weight)
+        + (heading_bonus * heading_weight)
+    )
+
+    if model.family != "single_embedding":
+        score += min(len(common_terms), 4) * 0.08
+
+    return round(score, 6), common_terms
+
+
+def _summarize_text(text: str, max_chars: int = 160) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max_chars - 1].rstrip() + "…"
+
+
+def rank_chunks_for_model(query: str, chunks: Sequence[Chunk], model: ModelSpec, top_k: int) -> dict[str, object]:
+    ranked = []
+    for chunk in chunks:
+        score, match_terms = score_chunk(query, chunk, model)
+        ranked.append(
+            {
+                "chunk_id": chunk.chunk_id,
+                "source": chunk.source,
+                "kind": chunk.kind,
+                "score": score,
+                "match_terms": match_terms,
+                "text": chunk.text,
+                "preview": _summarize_text(chunk.text),
+            }
+        )
+
+    ranked.sort(key=lambda item: (-item["score"], item["chunk_id"]))
+    top_results = []
+    for index, item in enumerate(ranked[:top_k], start=1):
+        top_results.append(
+            {
+                "rank": index,
+                "chunk_id": item["chunk_id"],
+                "source": item["source"],
+                "kind": item["kind"],
+                "score": item["score"],
+                "match_terms": item["match_terms"],
+                "preview": item["preview"],
+            }
+        )
 
     return {
+        "model_key": model.key,
+        "display_name": model.display_name,
+        "family": model.family,
+        "runtime_mode": model.runtime_mode,
+        "runtime_summary": model.runtime_summary,
+        "review_note": model.review_note,
+        "top_k": top_results,
+    }
+
+
+def build_query_demo(query: str, chunks: Sequence[Chunk], top_k: int) -> dict[str, object]:
+    catalog = build_model_catalog()
+    return {
+        "query": query,
+        "top_k": top_k,
+        "review_goal": "사람이 각 임베딩 방식별 Top K를 직접 보고, 관련 문서가 최상단에 잘 오는지 확인",
         "input_summary": {
             "total_chunks": len(chunks),
             "sources": sorted({chunk.source for chunk in chunks}),
             "chunk_kinds": sorted({chunk.kind for chunk in chunks}),
         },
         "models": [asdict(model) for model in catalog],
-        "validation_questions": [
-            "단일 임베딩으로 충분한가?",
-            "단일 임베딩으로 멀티벡터 리랭킹용 후보를 선정할 수 있을까?",
-            "멀티 임베딩이 얼마나 잘 동작하는가?",
-        ],
-        "experiments": experiments,
+        "retrieval_results": [rank_chunks_for_model(query, chunks, model, top_k) for model in catalog],
         "chunks": [asdict(chunk) for chunk in chunks],
     }
 
 
-def render_markdown_report(plan: dict[str, object]) -> str:
-    input_summary = plan.get("input_summary") or {}
-    models: list[dict[str, object]] = plan.get("models") or []
-    experiments: list[dict[str, object]] = plan.get("experiments") or []
-    questions = plan.get("validation_questions") or []
+def render_markdown_report(result: dict[str, object]) -> str:
+    input_summary = result.get("input_summary") or {}
+    models: list[dict[str, object]] = result.get("models") or []
+    retrieval_results: list[dict[str, object]] = result.get("retrieval_results") or []
     sources = input_summary.get("sources") if isinstance(input_summary, dict) else []
     chunk_kinds = input_summary.get("chunk_kinds") if isinstance(input_summary, dict) else []
     total_chunks = input_summary.get("total_chunks") if isinstance(input_summary, dict) else 0
@@ -317,44 +447,53 @@ def render_markdown_report(plan: dict[str, object]) -> str:
     lines = [
         "# Embedding Comparison Demo",
         "",
-        "## Input Summary",
+        "## Review Goal",
+        str(result.get("review_goal", "not provided")),
+        "",
+        "## Query Setup",
+        f"- Query: {result.get('query', '')}",
+        f"- Top K: {result.get('top_k', 0)}",
         f"- Total chunks: {total_chunks}",
         f"- Sources: {', '.join(sources) if sources else 'none'}",
         f"- Chunk kinds: {', '.join(chunk_kinds) if chunk_kinds else 'none'}",
         "",
-        "## Model Catalog",
+        "## Runtime Preparation",
     ]
 
     for model in models:
         lines.append(
-            "- "
-            f"**{model.get('display_name', 'unknown')}** · "
-            f"{model.get('family', 'unknown')} · "
-            f"{model.get('dimension_notes', 'unknown')} · "
-            f"{model.get('purpose', 'unknown')}"
+            f"### {model.get('display_name', 'unknown')}"
         )
+        lines.append(f"- family: {model.get('family', 'unknown')}")
+        lines.append(f"- runtime_mode: {model.get('runtime_mode', 'unknown')}")
+        lines.append(f"- runtime_summary: {model.get('runtime_summary', 'unknown')}")
+        lines.append(f"- dimension_notes: {model.get('dimension_notes', 'unknown')}")
+        prep_steps = model.get("prep_steps", [])
+        for step in prep_steps:
+            lines.append(f"  - {step}")
+        lines.append("")
 
-    lines.extend(["", "## Validation Questions"])
-    lines.extend(f"- {question}" for question in questions)
-    lines.extend(["", "## Experiment Plan"])
-
-    for experiment in experiments:
-        lines.append(f"### {experiment.get('name', 'unnamed_experiment')}")
-        lines.append(f"- Goal: {experiment.get('goal', 'not provided')}")
-        for key in ("models", "candidate_models", "rerankers", "candidate_cutoffs", "strategies", "metrics"):
-            if key in experiment:
-                value = experiment[key]
-                if isinstance(value, list):
-                    value = ", ".join(str(item) for item in value)
-                lines.append(f"- {key}: {value}")
-        lines.append(f"- success_criteria: {experiment.get('success_criteria', 'not provided')}")
+    lines.append("## Top K Results By Embedding Method")
+    for item in retrieval_results:
+        lines.append(f"### {item.get('display_name', 'unknown')}")
+        lines.append(f"- family: {item.get('family', 'unknown')}")
+        lines.append(f"- runtime_mode: {item.get('runtime_mode', 'unknown')}")
+        lines.append(f"- review_note: {item.get('review_note', 'unknown')}")
+        for ranked in item.get("top_k", []):
+            lines.append(
+                f"- #{ranked.get('rank')} | score={ranked.get('score')} | "
+                f"{ranked.get('chunk_id')} | matches={', '.join(ranked.get('match_terms', [])) or 'none'}"
+            )
+            lines.append(f"  - source: {ranked.get('source', 'unknown')}")
+            lines.append(f"  - preview: {ranked.get('preview', '')}")
         lines.append("")
 
     return "\n".join(lines).strip() + "\n"
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Prepare an embedding comparison demo plan.")
+    parser = argparse.ArgumentParser(description="Show per-query Top K retrieval results across embedding methods.")
+    parser.add_argument("--query", required=True, help="Natural language query to inspect.")
     parser.add_argument("--docs", nargs="*", default=[], help="Absolute paths to markdown files or directories.")
     parser.add_argument("--json-input", help="Absolute path to a JSON file of extracted sentences.")
     parser.add_argument(
@@ -363,6 +502,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=[],
         help="Repeatable inline extracted sentence input.",
     )
+    parser.add_argument("--top-k", type=int, default=5, help="Number of ranked items to show per model.")
     parser.add_argument(
         "--max-chars",
         type=int,
@@ -382,12 +522,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_argument_parser().parse_args(argv)
     chunks = load_markdown_chunks(args.docs, max_chars=args.max_chars)
     chunks.extend(load_extracted_chunks(json_path=args.json_input, inline_items=args.inline_item))
-    plan = build_demo_plan(chunks)
+    result = build_query_demo(args.query, chunks, args.top_k)
 
     if args.output == "json":
-        print(json.dumps(plan, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
-        print(render_markdown_report(plan), end="")
+        print(render_markdown_report(result), end="")
 
     return 0
 
