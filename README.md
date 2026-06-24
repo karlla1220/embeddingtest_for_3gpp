@@ -27,7 +27,7 @@ python embedding_demo.py \
 
 ```bash
 python embedding_demo.py \
-  --query "late interaction rerank 후보" \
+  --query "late interaction rerank 후보군" \
   --docs /absolute/path/to/file.md \
   --inline-item "핵심 문장 1" \
   --inline-item "핵심 문장 2" \

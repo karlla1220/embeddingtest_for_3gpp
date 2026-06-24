@@ -15,12 +15,15 @@ from embedding_demo import (
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SAMPLE_MARKDOWN = "# 제목\n\n3GPP 임베딩 비교 데모 문서입니다. Qwen과 OpenAI 비교를 포함합니다.\n\nColBERT와 reranker 후보군 확인."
+
+
+def create_sample_markdown() -> str:
+    return "# 제목\n\n3GPP 임베딩 비교 데모 문서입니다. Qwen과 OpenAI 비교를 포함합니다.\n\nColBERT와 reranker 후보군 확인."
 
 
 class EmbeddingDemoTests(unittest.TestCase):
     def test_model_catalog_contains_requested_targets(self) -> None:
-        """Verify the demo exposes all requested models and both runtime preparation modes."""
+        """Verify the demo exposes all requested models and the openai_compatible_api/local_cpu modes."""
         models = build_model_catalog()
         model_names = {model.display_name for model in models}
         self.assertEqual(
@@ -39,7 +42,7 @@ class EmbeddingDemoTests(unittest.TestCase):
 
     def test_markdown_and_extracted_inputs_are_chunked(self) -> None:
         markdown_chunks = chunk_markdown_text(
-            SAMPLE_MARKDOWN,
+            create_sample_markdown(),
             str(Path(tempfile.gettempdir()) / "demo.md"),
             max_chars=50,
         )
@@ -49,7 +52,7 @@ class EmbeddingDemoTests(unittest.TestCase):
         self.assertEqual([chunk.text for chunk in extracted_chunks], ["중요 문장 1", "중요 문장 2"])
 
     def test_query_demo_returns_top_k_per_model(self) -> None:
-        """Verify query-driven output returns the requested Top K across every model."""
+        """Verify query-driven output structure, Top K count per model, and markdown rendering."""
         chunks = load_extracted_chunks(
             inline_items=[
                 "3GPP 임베딩 비교를 위한 OpenAI text-small 기준 문장",
@@ -58,15 +61,16 @@ class EmbeddingDemoTests(unittest.TestCase):
             ]
         )
         result = build_query_demo("OpenAI 임베딩 비교", chunks, top_k=2)
+        model_count = len(build_model_catalog())
 
         self.assertEqual(result["query"], "OpenAI 임베딩 비교")
         self.assertEqual(result["top_k"], 2)
-        self.assertEqual(len(result["retrieval_results"]), 6)
+        self.assertEqual(len(result["retrieval_results"]), model_count)
         for model_result in result["retrieval_results"]:
             self.assertEqual(len(model_result["top_k"]), 2)
 
-        first_model_top_1 = result["retrieval_results"][0]["top_k"][0]
-        self.assertEqual(first_model_top_1["chunk_id"], "extract-001")
+        top_by_model = {item["model_key"]: item["top_k"][0] for item in result["retrieval_results"]}
+        self.assertEqual(top_by_model["openai_text_small"]["chunk_id"], "extract-001")
 
         markdown_report = render_markdown_report(result)
         self.assertIn("Top K Results By Embedding Method", markdown_report)
@@ -118,7 +122,7 @@ class EmbeddingDemoTests(unittest.TestCase):
             payload = json.loads(result.stdout)
             self.assertEqual(payload["input_summary"]["total_chunks"], 4)
             self.assertEqual(payload["top_k"], 2)
-            self.assertEqual(len(payload["models"]), 6)
+            self.assertEqual(len(payload["models"]), len(build_model_catalog()))
             self.assertEqual(len(payload["retrieval_results"][0]["top_k"]), 2)
 
 

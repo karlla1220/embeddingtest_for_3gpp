@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Sequence
 
 
-SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。！？])(?:\s+|$)")
 TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]+")
+NON_SINGLE_MATCH_CAP = 4
+NON_SINGLE_MATCH_BONUS = 0.08
 
 
 @dataclass(frozen=True)
@@ -170,7 +172,7 @@ def _split_oversized_text(text: str, max_chars: int) -> list[str]:
             word_chunks: list[str] = []
             current = ""
             for word in words:
-                candidate = f"{current} {word}".strip() if current else word
+                candidate = f"{current} {word}" if current else word
                 if current and len(candidate) > max_chars:
                     word_chunks.append(current)
                     current = word
@@ -196,7 +198,7 @@ def _split_oversized_text(text: str, max_chars: int) -> list[str]:
     current = ""
 
     for sentence in sentences:
-        candidate = f"{current} {sentence}".strip() if current else sentence
+        candidate = f"{current} {sentence}" if current else sentence
         if current and len(candidate) > max_chars:
             sentence_chunks.append(current)
             current = sentence
@@ -354,9 +356,6 @@ def score_chunk(query: str, chunk: Chunk, model: ModelSpec) -> tuple[float, list
     phrase = _phrase_bonus(query, chunk.text)
     heading_bonus = 0.35 if chunk.text.lstrip().startswith("#") else 0.0
 
-    # Tuple order: coverage_weight, ordered_weight, phrase_weight, density_weight, heading_weight.
-    # The values intentionally emphasize exact or near-exact matches more strongly for rerankers
-    # and late-interaction models so reviewers can inspect different Top K orderings per method.
     score_profiles = {
         "openai_text_small": (3.0, 1.2, 1.5, 0.4, 0.0),
         "qwen3_embedding_8b": (3.2, 1.0, 1.8, 0.3, 0.1),
@@ -365,11 +364,18 @@ def score_chunk(query: str, chunk: Chunk, model: ModelSpec) -> tuple[float, list
         "colbert": (3.4, 1.9, 1.8, 0.2, 0.2),
         "nemotron": (3.3, 2.0, 1.9, 0.2, 0.15),
     }
-    coverage_weight, ordered_weight, phrase_weight, density_weight, heading_weight = score_profiles[model.key]
+    default_profile = (3.0, 1.2, 1.5, 0.3, 0.0)
+    # Tuple order: coverage_weight, ordered_overlap_weight, phrase_weight, density_weight, heading_bonus_weight.
+    # The values intentionally emphasize exact or near-exact matches more strongly for rerankers
+    # and late-interaction models so reviewers can inspect different Top K orderings per method.
+    coverage_weight, ordered_overlap_weight, phrase_weight, density_weight, heading_weight = score_profiles.get(
+        model.key,
+        default_profile,
+    )
 
     score = (
         (coverage * coverage_weight)
-        + (ordered_overlap * ordered_weight)
+        + (ordered_overlap * ordered_overlap_weight)
         + (phrase * phrase_weight)
         + (density * density_weight)
         + (heading_bonus * heading_weight)
@@ -378,7 +384,10 @@ def score_chunk(query: str, chunk: Chunk, model: ModelSpec) -> tuple[float, list
     # Non-dense-only models receive a small extra boost for multiple matched terms because the
     # demo is trying to approximate rerank behavior on the same review corpus without real inference.
     if model.family != "single_embedding":
-        score += min(len(common_terms), 4) * 0.08
+        # Reranker and late-interaction demo modes get a small matched-term bonus so they can
+        # surface slightly sharper Top K ordering in the qualitative review output. The
+        # NON_SINGLE_MATCH_CAP and NON_SINGLE_MATCH_BONUS values keep that extra signal modest.
+        score += min(len(common_terms), NON_SINGLE_MATCH_CAP) * NON_SINGLE_MATCH_BONUS
 
     return round(score, 6), common_terms
 
@@ -480,9 +489,7 @@ def render_markdown_report(result: dict[str, object]) -> str:
     ]
 
     for model in models:
-        lines.append(
-            f"### {model.get('display_name', 'unknown')}"
-        )
+        lines.append(f"### {model.get('display_name', 'unknown')}")
         lines.append(f"- family: {model.get('family', 'unknown')}")
         lines.append(f"- runtime_mode: {model.get('runtime_mode', 'unknown')}")
         lines.append(f"- runtime_summary: {model.get('runtime_summary', 'unknown')}")
